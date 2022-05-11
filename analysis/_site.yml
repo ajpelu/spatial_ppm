@@ -1,7 +1,7 @@
-name: "spatial_ppm"
+name: spatial_ppm
 output_dir: ../docs
 navbar:
-  title: "spatial_ppm"
+  title: spatial_ppm
   left:
   - text: Home
     href: index.html
@@ -9,6 +9,10 @@ navbar:
     href: about.html
   - text: License
     href: license.html
+  right:
+  - icon: fab fa-github
+    text: Source code
+    href: https://github.com/ajpelu/spatial_ppm
 output:
   workflowr::wflow_html:
     toc: yes
