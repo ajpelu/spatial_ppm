@@ -1,0 +1,97 @@
+---
+title: "get_lidar"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+## Introduction
+
+
+```{r}
+library(tidyverse)
+library(sf)
+library(spdep)
+```
+
+```{r}
+raw <- readxl::read_excel(here::here("data/seleccion_puesta.xlsx"), sheet = "datos") |> 
+  clean_names() |> 
+  sf::st_as_sf(coords = c("longitud_x", "latitud_y"),
+              crs = st_crs(25830))
+# st_write(raw, "data/spatial/spatial_ppm.shp")
+
+ds <- split(raw, f = d$sitio)
+```
+
+
+```{r}
+bb_cq <- st_bbox(ds$CQ) |> st_as_sfc() |> st_write("data/spatial/bb_cq.shp", driver = "ESRI Shapefile")
+bb_lp <- st_bbox(ds$LP) |> st_as_sfc() |> st_write("data/spatial/bb_lp.shp", driver = "ESRI Shapefile")
+bb_vc <- st_bbox(ds$VC) |> st_as_sfc() |> st_write("data/spatial/bb_vc.shp", driver = "ESRI Shapefile")
+```
+
+
+```{r}
+vc <- ds$VC
+
+vc149 <- vc |> filter(number_pino == "100") |> 
+  st_buffer(dist = 25) |> 
+  st_transform(3042)
+
+
+las_file <- readLAS("raw_data/lidar/PNOA_2020_AND_NE_530-4156_ORT-CLA-RGB.laz")
+
+dtm <- rasterize_terrain(las_file, 1, knnidw())
+
+nlas <- las_file - dtm
+
+clipped_las <- clip_roi(nlas, vc149)
+
+# writeLAS(clipped_las, file = "raw_data/lidar/vc1.laz")
+
+
+chm <- rasterize_canopy(clipped_las, res = 0.5, algorithm = p2r())
+chm <- rasterize_canopy(clipped_las, res = 0.5, 
+                        algorithm = p2r(subcircle = 0.15, na.fill = tin()))
+
+
+pino_focal <- vc |> filter(number_pino == "100") |> 
+  st_transform(3042)
+
+
+chmno_soil <- chm > .75
+plot(chmno_soil, col = col)
+plot(sf::st_geometry(pino_focal), add = TRUE, pch = 3)
+plot(sf::st_geometry(vc149), add = TRUE, pch = 3)
+
+
+distances_pines |> 
+  filter(sitio == "VC") |> 
+  filter(focal_pine == 100)  
+  
+
+
+
+f <- function(x) {x * 0.1 + 3}
+heights <- seq(0,30,1)
+ws <- f(heights)
+plot(heights, ws, type = "l", ylim = c(0,6))
+ttops <- locate_trees(chm_p2r_05, lmf(2))
+plot(chm, col = height.colors(50))
+plot(sf::st_geometry(ttops), add = TRUE, pch = 3)
+
+
+
+writeRaster(chm, filename = "raw_data/lidar/vc50_chm.tif")
+```
+
+
+```{r}
+library(lidR)
+las_file <- lidR::readLAS("raw_data/lidar/PNOA_2020_AND_NE_530-4156_ORT-CLA-RGB.laz")
+
+
+```
+
+

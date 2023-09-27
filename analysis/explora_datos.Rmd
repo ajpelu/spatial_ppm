@@ -9,6 +9,146 @@ editor_options:
 ## Introduction
 
 ```{r}
+library(tidyverse)
+library(here)
+library(sf)
+library(xlsx)
+library(janitor)
+library(terra)
+
+
+library(mapview)
+library(leaflet)
+library(spatstat)
+library(onpoint)
+```
+
+```{r}
+raw <- readxl::read_excel(here::here("data/seleccion_puesta.xlsx"), sheet = "datos") |> 
+  clean_names()
+```
+
+
+```{r}
+d <- st_as_sf(raw, coords = c("longitud_x", "latitud_y"),
+              crs = st_crs(25830))
+
+ds <- split(d, f = d$sitio)
+
+
+
+
+
+
+
+
+
 
 ```
+
+
+
+```{r}
+
+```
+
+
+## Explore data 
+
+```{r}
+# pal <- colorNumeric(
+#   palette = "RdYlGn",
+#   domain = d4326$number_puestas)
+
+pal <- colorFactor(palette = 'RdYlGn', d$number_puestas)
+
+popup_puestas <- paste0(
+  "<strong>Sitio:</strong> ", d4326$sitio,
+  "<br><strong>Árbol:</strong> ", d4326$number_pino,
+  "<br><strong>Altura (cm):</strong> ", d4326$h_cm,
+  "<br><strong>Nº puestas:</strong> ", d4326$number_puestas
+)
+
+```
+
+
+### 
+```{r}
+d4326 %>% 
+  leaflet() %>% 
+  addTiles() %>% 
+  addCircleMarkers(
+    radius = ~ number_puestas,
+    color = ~pal(number_puestas),
+    popup = popup_puestas)
+```
+
+
+```{r}
+vc <- d %>% filter(sitio == "CQ")
+
+vc_ppp <- as.ppp(
+  X = st_coordinates(vc), 
+  W = as.owin(st_bbox(vc)))
+
+
+aux <- vc %>% st_drop_geometry() %>% 
+  dplyr::select(number_puestas) %>% as.data.frame()
+
+marks(vc_ppp) <- aux
+
+plot(envelope(vc_ppp, Kest))
+plot(density(vc_ppp))
+plot(vc_ppp, add = TRUE)
+
+plot(Smooth(vc_ppp))
+
+plot(envelope(vc_ppp,fun=Kinhom,funargs=list(correction="border"),global=TRUE))
+
+l_function <- Lest(vc_ppp, correction = "Ripley")
+l_function_centered <- center_l_function(vc_ppp, correction = "Ripley")
+plot(l_function_centered)
+plot(ee)
+
+o_ring <- estimate_o_ring(vc_ppp)
+plot(o_ring)
+
+oring_envelope <- envelope(vc_ppp, fun = estimate_o_ring, nsim = 199, verbose = FALSE)
+
+plot(oring_envelope)
+
+m3 <- kppm(vc_ppp ~ number_puestas,data=aux)
+
+
+mod2<-ppm(vc_ppp, trend=~number_puestas) # this works fine giving me a ppm model
+> summary(mod2)
+>
+
+summary(vc_ppp)
+
+vc_ppp <- as(vc, "Spatial")
+vc_ppp <- as(vc_ppp, "ppp")
+
+v <- ppp(vc$longitud_x, vc$latitud_y,
+         c(min(vc$longitud_x), max(vc$longitud_x)),
+c(min(vc$latitud_y), max(vc$longitud_x)))
+```
+
+
+```{r}
+ds <- density(vc_ppp,
+              sigma = 7) # Smoothing bandwidth, or bandwidth selection function
+plot(ds,  main='N puestas')
+contour(ds, add=TRUE)
+
+opt_bw <-bw.diggle(vc_ppp)
+opt_ds <-density(vc_ppp, sigma=opt_bw) # Using optimal bandwidths
+
+plot(opt_ds,  main='N puestas')
+contour(opt_ds, add=TRUE)
+
+persp(opt_ds)
+```
+
+
 
