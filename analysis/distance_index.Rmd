@@ -1,0 +1,191 @@
+---
+title: "Degree of Tree isolation"
+author: '[Antonio J. Pérez-Luque](https://github.com/ajpelu) <a href="https://orcid.org/0000-0002-1747-0469" target="orcid.widget">
+<img alt="ORCID logo" src="https://info.orcid.org/wp-content/uploads/2019/11/orcid_16x16.png" width="16" height="16" /></a>'
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+## Introduction
+```{r setup, echo=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+```{r}
+library("tidyverse")
+library("sf")
+library("DT")
+library("janitor")
+library("here")
+```
+
+- Read the data and set the crs to `epsg:25830`. 
+
+```{r}
+raw <- readxl::read_excel("data/seleccion_puesta.xlsx", sheet = "datos") |> 
+  clean_names() |> 
+  sf::st_as_sf(coords = c("longitud_x", "latitud_y"),
+              crs = st_crs(25830))
+
+#ds <- split(raw, f = raw$sitio)
+```
+
+- Write a loop code to perform the followings: 
+  
+For each site (`r glue::glue_collapse(unique(raw$sitio), sep=", ", last = " and ")`), we compute the distance in meters between each focal tree (`focal_pine`) and the $k$ nearest neighbors.  We retain the features of each neighbor, and also the distance between the focal_pine and the neighbors. We export the data (all sites) as data.frame and shapefiles (by site). 
+  
+```{r, eval=FALSE}
+sites <- unique(raw$sitio)
+
+# Define the value of k (number of nearest neighbors)
+k <- 10
+
+bysites <- list() 
+
+for (j in sites) {
+  
+  s <- raw |> filter(sitio == j)
+  
+  # list to store 
+  neighbors_list <- list()
+  
+  for (i in seq_along(s$number_pino)) {
+    point <- s[i, ] # select a pine 
+    focal_pine <- point$number_pino
+    
+    distances <- st_distance(s, point) # compute distance bewteen focal pine and all the pines
+    # Sort distances and find the top k nearest neighbors
+    nearest_indices <- order(distances)[1:k]
+    neighbors <- s[nearest_indices, ] # select the nearest neighbors
+    
+    # Calculate distances between the point and its k-nearest neighbors
+    neighbor_distances <- distances[nearest_indices]
+
+    neighbors$distances <- neighbor_distances 
+    neighbors$focal_pine <- focal_pine
+  
+    neighbors_list[[i]] <- neighbors
+  }
+  
+   bysites[[j]] <- neighbors_list |> reduce(bind_rows) 
+}
+
+distances_pines <- bysites |> reduce(bind_rows) |> st_drop_geometry() 
+
+st_write(bysites[["CQ"]], "data/spatial/distances_cq.shp")
+st_write(bysites[["VC"]], "data/spatial/distances_vc.shp")
+st_write(bysites[["LP"]], "data/spatial/distances_lp.shp")
+
+write_csv(distances_pines, "data/distances.csv")
+```
+
+## Tree isolation 
+
+### Neighbors distance 
+
+- Our hypothesis is that focal trees that present a higher average distance value to neighboring trees are more likely to be isolated. So, we compute the degree of isolation as a function of the average distances. Therefore, for each focal tree we compute the average distance to the 4-, 5- and 6-neighbors tree. Note that we remove those trees with distances higher than 25 meters from the focal tree. 
+
+```{r}
+distances_pines <- read_csv("data/distances.csv")
+
+d <- distances_pines  |> 
+  mutate(remove = ifelse(focal_pine == number_pino, 1, 0)) |> 
+  filter(remove == 0) |> 
+  dplyr::select(-remove) |> 
+  filter(distances <= 25)
+
+
+# Distance to nearest k 
+avgDistance_k <- function (data, k) {
+  results <- data |> 
+  group_by(sitio, focal_pine) |> 
+  slice(1:k) |>
+  summarise(mean = mean(distances, na.rm=TRUE),
+            sd = sd(distances, na.rm=TRUE),
+            se = sd/sqrt(length(distances)))
+}
+
+d4 <- avgDistance_k(d, 4) |> mutate(k=4)
+d3 <- avgDistance_k(d, 3) |> mutate(k=3)
+d5 <- avgDistance_k(d, 5) |> mutate(k=5)
+
+a <- bind_rows(
+d3 |> pivot_longer(-c("focal_pine", "k", "sitio")),
+d4 |> pivot_longer(-c("focal_pine", "k","sitio")),
+d5 |> pivot_longer(-c("focal_pine", "k", "sitio"))) |> 
+  pivot_wider(values_from = value, names_from = name)
+
+aux_pine <- distances_pines |> 
+  mutate(remove = ifelse(focal_pine == number_pino, 1, 0)) |> 
+  filter(remove == 1) |> 
+  dplyr::select(-remove, -distances, -focal_pine)
+
+df_pine <- aux_pine |>
+  inner_join(a, by=c("number_pino"="focal_pine", 
+                     "sitio"="sitio"))
+```
+
+We explore the relation between the number of puestas and the average distance. First we assess the potential bias of use 3, 4 or 5 neighbors. 
+
+```{r, fig.height=10}
+df_pine |> 
+  ggplot(aes(x=mean, y=number_puestas)) +
+  geom_point() + 
+  facet_wrap(~k, ncol = 1) + 
+  xlab("Average distance (m) of focal pine to nearest k-neighbors") +
+  ylab("Number of 'puestas' of the Focal pine") +
+  theme_minimal() 
+```
+
+In this table we show the average distance (m) to the focal tree of the 4 nearest neighbors:
+
+```{r}
+df_pine |> 
+  filter(k == 4) |> 
+  mutate(across(mean:se,.fns = ~round(., 2))) |> 
+  dplyr::select(sitio, focal_pine = number_pino, tree_height = h_cm, 
+                puestas = number_puestas, dist_avg = mean, dist_sd = sd, dist_se = se
+                ) |> 
+  datatable(filter = 'top') 
+```
+
+What if we asses the cases with number of puestas > 0? 
+
+```{r}
+df_pine |> 
+  filter(k==4) |> 
+  filter(number_puestas > 0) |> 
+  ggplot(aes(x=mean, y=number_puestas, colour = sitio)) +
+  geom_point() + 
+  xlab("Average distance (m) of focal pine to nearest k-neighbors") +
+  ylab("Number of 'puestas' of the Focal pine") +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom"
+  ) +
+  stat_smooth(method = "lm")
+```
+
+```{r, eval=FALSE, echo=FALSE}
+# https://www.pommerening.org/wiki/index.php?title=Arne_Pommerening%27s_Forest_Biometrics_%26_Quantitative_Ecology_Lab&redirect=no
+# 
+# https://www.researchgate.net/publication/237865857_Effects_of_competitor_spacing_in_individual-tree_indices_of_competition 
+# 
+# https://academic.oup.com/forestscience/article/49/1/36/4617467
+# 
+# https://journals.plos.org/plosone/article/file?type=printable&id=10.1371/journal.pone.0194710 
+# 
+# En este libro ver pp 120- 139
+# https://link.springer.com/chapter/10.1007/978-3-030-24528-3_4 
+
+
+```
+
+### Other indices
+- to explore 
+

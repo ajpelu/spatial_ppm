@@ -8,4 +8,8 @@ editor_options:
   chunk_output_type: console
 ---
 
-Welcome to my research website.
+## Analysis 
+
+- [Compute the average distance of the k-nearest neighbors to the focal tree](distance_index.html)
+
+
