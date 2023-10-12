@@ -12,4 +12,8 @@ editor_options:
 
 - [Compute the average distance of the k-nearest neighbors to the focal tree](distance_index.html)
 
+- [Prepare LIDAR data](get_lidar.html)
+
+- [Compute the available % of soil around each focal pine](analysis_lidar.html)
+
 

@@ -7,11 +7,12 @@ editor_options:
 
 ## Introduction
 
-
 ```{r}
 library(tidyverse)
 library(sf)
-library(spdep)
+library(janitor)
+library(lidR)
+library(terra)
 ```
 
 ```{r}
@@ -21,77 +22,179 @@ raw <- readxl::read_excel(here::here("data/seleccion_puesta.xlsx"), sheet = "dat
               crs = st_crs(25830))
 # st_write(raw, "data/spatial/spatial_ppm.shp")
 
-ds <- split(raw, f = d$sitio)
+ds <- split(raw, f = raw$sitio)
 ```
 
+## Prepare data 
 
-```{r}
-bb_cq <- st_bbox(ds$CQ) |> st_as_sfc() |> st_write("data/spatial/bb_cq.shp", driver = "ESRI Shapefile")
-bb_lp <- st_bbox(ds$LP) |> st_as_sfc() |> st_write("data/spatial/bb_lp.shp", driver = "ESRI Shapefile")
-bb_vc <- st_bbox(ds$VC) |> st_as_sfc() |> st_write("data/spatial/bb_vc.shp", driver = "ESRI Shapefile")
+- Generate a bbox of each site to download the lidar data 
+
+```{r, eval=FALSE}
+generateBuffer <- function(data, dist) {
+  result <- sf::st_bbox(data) |> 
+    st_as_sfc() |> 
+    st_buffer(dist = dist, joinStyle = "MITRE", mitreLimit = dist) 
+  return(result)
+  }
+
+bb_cq <- generateBuffer(ds$CQ, dist = 50) |> st_write("data/spatial/bb_cq.shp", driver = "ESRI Shapefile", append=FALSE)
+bb_lp <- generateBuffer(ds$LP, dist = 50) |> st_write("data/spatial/bb_lp.shp", driver = "ESRI Shapefile", append=FALSE)
+bb_vc <- generateBuffer(ds$VC, dist = 50) |> st_write("data/spatial/bb_vc.shp", driver = "ESRI Shapefile", append=FALSE)
 ```
 
+## % soil around each pine
+
+- Create a custom function 
 
 ```{r}
-vc <- ds$VC
-
-vc149 <- vc |> filter(number_pino == "100") |> 
-  st_buffer(dist = 25) |> 
-  st_transform(3042)
-
-
-las_file <- readLAS("raw_data/lidar/PNOA_2020_AND_NE_530-4156_ORT-CLA-RGB.laz")
-
-dtm <- rasterize_terrain(las_file, 1, knnidw())
-
-nlas <- las_file - dtm
-
-clipped_las <- clip_roi(nlas, vc149)
-
-# writeLAS(clipped_las, file = "raw_data/lidar/vc1.laz")
-
-
-chm <- rasterize_canopy(clipped_las, res = 0.5, algorithm = p2r())
-chm <- rasterize_canopy(clipped_las, res = 0.5, 
-                        algorithm = p2r(subcircle = 0.15, na.fill = tin()))
-
-
-pino_focal <- vc |> filter(number_pino == "100") |> 
-  st_transform(3042)
-
-
-chmno_soil <- chm > .75
-plot(chmno_soil, col = col)
-plot(sf::st_geometry(pino_focal), add = TRUE, pch = 3)
-plot(sf::st_geometry(vc149), add = TRUE, pch = 3)
-
-
-distances_pines |> 
-  filter(sitio == "VC") |> 
-  filter(focal_pine == 100)  
+available_soil_lidar <- function(normalized_las, 
+                                 spatial_pine, 
+                                 treshold_height = 0.5,
+                                 pine, 
+                                 buffer_radius = 25, 
+                                 output_path, 
+                                 site, ...) {
   
+  # Get pine 
+  fpi <- spatial_pine |> dplyr::filter(number_pino == as.character(pine))
+  
+  # buffer 25
+  b25 <- fpi |> st_buffer(dist = buffer_radius)
+  
+  # clipped las 
+  clipped_las <- clip_roi(normalized_las, b25)
+  
+  # Chm 
+  chm <- rasterize_canopy(clipped_las, res = 0.5, algorithm = p2r(subcircle = 0.15, na.fill = tin()))
+  # chm above treshold_height 
+  chm_nosoil <- chm > treshold_height
+  
+  # Smoothed 
+  w <- matrix(1, 3, 3)
+  chm_smoothed <- terra::focal(chm, w, fun = mean, na.rm = TRUE)
+  chm_nosoil_smoothed <- terra::focal(chm_nosoil, w, fun = mean, na.rm = TRUE)
 
+  terra::writeRaster(chm, filename = paste0(output_path, "chm_", site, "_", pine, ".tif"), overwrite = TRUE)
+  terra::writeRaster(chm_nosoil, filename = paste0(output_path, "chm_nosoil_", site, "_", pine, ".tif"), overwrite = TRUE)
+  terra::writeRaster(chm_smoothed, filename = paste0(output_path, "chm_smoothed_", site, "_", pine, ".tif"), overwrite = TRUE)
+  terra::writeRaster(chm_nosoil_smoothed, filename = paste0(output_path, "chm_nosoil_smoothed_", site, "_", pine, ".tif"), overwrite = TRUE)
+  
+  
+  # compute area 
+  results <- terra::expanse(chm_nosoil, byValue = TRUE) |> 
+    as.data.frame() |> 
+    dplyr::select(-layer) |> 
+    mutate(value = case_when(
+      value == 0 ~ "< 50 cm", 
+      TRUE ~ "> 50 cm")) |> 
+  mutate(number_pino = pine)
+  
+  return(results)
 
+}
+```
 
-f <- function(x) {x * 0.1 + 3}
-heights <- seq(0,30,1)
-ws <- f(heights)
-plot(heights, ws, type = "l", ylim = c(0,6))
-ttops <- locate_trees(chm_p2r_05, lmf(2))
-plot(chm, col = height.colors(50))
-plot(sf::st_geometry(ttops), add = TRUE, pch = 3)
+- Prepare lidar data and apply to each site 
 
+### VC
+```{r, eval=FALSE}
+d <- ds$VC |> st_transform(3042)
 
-
-writeRaster(chm, filename = "raw_data/lidar/vc50_chm.tif")
+las <- readLAS("raw_data/lidar/PNOA_2020_AND_NE_530-4156_ORT-CLA-RGB.laz")
+# dtm 
+dtm <- rasterize_terrain(las, res = 0.5, knnidw())
+# normalize 
+nlas <- las - dtm
 ```
 
 
-```{r}
-library(lidR)
-las_file <- lidR::readLAS("raw_data/lidar/PNOA_2020_AND_NE_530-4156_ORT-CLA-RGB.laz")
+```{r, eval=FALSE}
+pinos <- unique(d$number_pino)
+results_list <- purrr::map(pinos, 
+                           ~ available_soil_lidar(normalized_las = nlas, 
+                                                  spatial_pine = d, 
+                                                  treshold_height = 0.5, 
+                                                  buffer_radius = 25,
+                                                  pine = .x, 
+                                                  site = "vc",
+                                                  output_path = here::here("data/chm/vc/")))
 
+lidar_vc <- bind_rows(results_list)
+aux <- lidar_vc |> mutate(site = "VC")
+write_csv(aux, "data/lidar_vc.csv")
+```
+
+### CQ
+```{r, eval=FALSE}
+d <- ds$CQ |> st_transform(3042)
+
+las <- lidR::readLAS("raw_data/lidar/PNOA_2020_AND_454-4090_ORT-CLA-RGB.laz")
+# dtm 
+dtm <- rasterize_terrain(las, res = 0.5, knnidw())
+# normalize 
+nlas <- las - dtm
+```
+
+
+```{r, eval=FALSE}
+pinos <- unique(d$number_pino)
+results_list <- purrr::map(pinos, 
+                           ~ available_soil_lidar(normalized_las = nlas, 
+                                                  spatial_pine = d, 
+                                                  treshold_height = 0.5, 
+                                                  buffer_radius = 25,
+                                                  pine = .x, 
+                                                  site = "cq",
+                                                  output_path = here::here("data/chm/cq/")))
+
+lidar_cq <- bind_rows(results_list)
+aux <- lidar_cq |> mutate(site = "CQ")
+write_csv(aux, "data/lidar_cq.csv")
+```
+
+
+### LP
+```{r, eval=FALSE}
+d <- ds$LP |> st_transform(3042)
+
+las <- readLAS("raw_data/lidar/PNOA_2020_AND_NE_458-4104_ORT-CLA-RGB.laz")
+# dtm 
+dtm <- rasterize_terrain(las, res = 0.5, knnidw())
+# normalize 
+nlas <- las - dtm
+```
+
+
+```{r, eval=FALSE}
+pinos <- unique(d$number_pino)
+results_list <- purrr::map(pinos, 
+                           ~ available_soil_lidar(normalized_las = nlas, 
+                                                  spatial_pine = d, 
+                                                  treshold_height = 0.5, 
+                                                  buffer_radius = 25,
+                                                  pine = .x, 
+                                                  site = "lp",
+                                                  output_path = here::here("data/chm/lp/")))
+
+lidar_lp <- bind_rows(results_list)
+aux <- lidar_lp |> mutate(site = "LP")
+write_csv(aux, "data/lidar_lp.csv")
+```
+
+
+
+
+```{r, eval=FALSE, echo=FALSE}
+plot(sf::st_geometry(fpi), add = TRUE, pch = 19, col='red')
+text(x = st_coordinates(fpi)[,1], 
+     y = st_coordinates(fpi)[,2], 
+     labels = fpi$number_pino)
+plot(sf::st_geometry(b25), add = TRUE, pch = 19, border="blue")
 
 ```
+
+
+
+
 
 

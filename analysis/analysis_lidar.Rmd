@@ -1,0 +1,299 @@
+---
+title: "Get stand structure "
+author: '[Antonio J. Pérez-Luque](https://github.com/ajpelu) <a href="https://orcid.org/0000-0002-1747-0469" target="orcid.widget">
+<img alt="ORCID logo" src="https://info.orcid.org/wp-content/uploads/2019/11/orcid_16x16.png" width="16" height="16" /></a>'
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+## Introduction
+
+```{r setup, echo=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+Our aim is to get the spatial stand structure around each of the focal pine. Specifically, we want to explore the number of neighbors in a 25-m radius plot, and also get the surface within this 25-m plot not cover by trees. This no-covered tree area could be considered as an indicator of the available habitat for the burial of caterpillars. For each focal pine we will get this area, and then we could modelize the number of clutches of processionary moths as a function of the available habitat around each focal pine. 
+
+
+```{r}
+library(tidyverse)
+library(sf)
+library(janitor)
+library(terra)
+library(lidR)
+library("DT")
+```
+
+## Methodology 
+
+### LIDAR processing
+We use the LIDAR data from PNOA. The steps followed to process the data were (see this [code](get_lidar.html) to more detail): 
+
+- For each area (VC, CQ, LP), we get the LIDAR data (2ª Cobertura) files (`.laz` format) 
+- Compute the Digital Terrain Model from LIDAR data using a resolution of 0.5 m (grid cell) and applying an invert distance weighting algorithm ([IDW](https://r-lidar.github.io/lidRbook/dtm.html#idw)).  
+- Normalization of the point cloud (normalized las data). 
+- Clip the normalized data data using a cicular plot with a radius of 25 m around the focal pine. 
+- Compute the Canopy Height Model (CHM), with a grid resolution of 0.5 m (grid cell). For each grid cell the height of the highest point is computed. All the elevations are now relative to the ground surface. For 25-m buffer polygon around each focal pine, a file with the chm was generated and saved as raster file (`chm.tiff` files). 
+
+```{r, echo=FALSE}
+raw <- readxl::read_excel(here::here("data/seleccion_puesta.xlsx"), sheet = "datos") |> 
+  clean_names() |> 
+  sf::st_as_sf(coords = c("longitud_x", "latitud_y"),
+              crs = st_crs(25830))
+# st_write(raw, "data/spatial/spatial_ppm.shp")
+
+ds <- split(raw, f = raw$sitio)
+
+spatial_pine <- ds$VC 
+# Get pine 
+fpi <- st_as_sf(spatial_pine |> dplyr::filter(number_pino == 32))
+# buffer 25
+b25 <- fpi |> st_buffer(dist = 25)
+```
+
+```{r, fig.cap="Example of canopy heigth model around a pine (32 of the VC site)."}
+chm <- rast("data/chm/vc/chm_vc_32.tif")
+chm_nosoil <- rast("data/chm/vc/chm_nosoil_vc_32.tif")
+
+col <- terrain.colors(7, rev = TRUE)
+plot(chm, col = col, main = "CHM (VC, focal pine 32)")
+plot(rep(sf::st_geometry(fpi),2), add = TRUE, pch = 21, col='black', bg="blue", cex = 1.5)
+text(x = st_coordinates(fpi)[,1] + 2, 
+     y = st_coordinates(fpi)[,2] + 2, 
+     labels = fpi$number_pino)
+```
+
+- Using the CHM, compute the number of pixels above a specific vertical threshold, *i.e.* surrogate to identify if a pixel could be considered occupied by tree or shrubland (> threshold). We used a treshold of 50 cm (Yes, I know it could be subjectively, and target to criticism). So all the pixels above this threshold could be considered as available habitat for the burial of caterpillars. 
+
+```{r, fig.cap="Example of canopy heigth model above 50 cm around a pine (32 of the VC site). Green pixels indicate those above > 50 cm."}
+chm_nosoil <- rast("data/chm/vc/chm_nosoil_vc_32.tif")
+
+col <- terrain.colors(7, rev = TRUE)
+plot(chm_nosoil, col = col, main = "CHM > 50 cm (VC, focal pine 32)")
+plot(rep(sf::st_geometry(fpi),2), add = TRUE, pch = 21, col='black', bg="blue", cex = 1.5)
+text(x = st_coordinates(fpi)[,1] + 2, 
+     y = st_coordinates(fpi)[,2] + 2, 
+     labels = fpi$number_pino)
+```
+
+- He we could compare the differences between CHM and CHM > 50 cm 
+
+```{r}
+chms <- c(chm, chm_nosoil)
+names(chms) <- c("chm", "chm > 50 cm")
+
+col <- terrain.colors(7, rev = TRUE)
+plot(chms, col = col)
+```
+
+- For each location, we exported a table with the area (in meters) around each pine (25-buffer polygon) of each category (above and below 50 cm). 
+
+```{r}
+d <- bind_rows(
+  read_csv("data/lidar_vc.csv"), 
+  read_csv("data/lidar_cq.csv"),
+  read_csv("data/lidar_lp.csv")) 
+```
+
+```{r}
+x <- d |> 
+  pivot_wider(names_from = value, values_from = area) |> 
+  rename(below_50 = `< 50 cm`, above_50 = `> 50 cm`) |> 
+  dplyr::rowwise() |> 
+  mutate(available_soil_pct = round((below_50 / (above_50 + below_50))*100,2)) |> 
+  inner_join(
+    (raw |> st_drop_geometry()), by = c("site" = "sitio", "number_pino" = "number_pino")
+  )
+```
+
+```{r}
+x |>  
+  mutate(across(below_50:above_50,.fns = ~round(., 2))) |> 
+  dplyr::select(sitio = site, focal_pine = number_pino, 
+                `area > 50cm` = above_50, `area < 50 cm` = below_50,
+                available_soil_pct,
+                tree_height = h_cm, 
+                puestas = number_puestas
+                ) |> 
+  datatable(filter = 'top')
+```
+
+
+
+### Some caveats 
+Before continuing, we must point out some limitations of the use of LIDAR and some errors derived from the processing and data collection in the field. 
+
+The first one is the exact position of each tree. The position data of each tree were recorded with a GPS device with an error that introduce some bias in the data. See this example: 
+
+```{r}
+col <- terrain.colors(25, rev = TRUE)
+chm <- rast("data/chm/vc/chm_smoothed_vc_32.tif")
+plot(chm, col = col)
+plot(sf::st_geometry(fpi), add = TRUE, pch = 21, col='black', bg="blue", cex = 1.5)
+text(x = st_coordinates(fpi)[,1] + 2, 
+     y = st_coordinates(fpi)[,2] + 2, 
+     labels = fpi$number_pino)
+plot(sf::st_geometry(b25), add = TRUE, pch = 19, border="blue")
+```
+
+We can see that the centroid of the focal pine does not correspond with the centroid of the pine obtanied using the LIDAR data. So, this error is propagated in different ways to the other pines (since the position of each pine is captured using a GPS device). 
+
+```{r}
+pines <- sf::st_intersection(b25, spatial_pine) |> 
+  filter(number_pino.1 != 32)
+
+plot(chm, col = col)
+plot(sf::st_geometry(fpi), add = TRUE, pch = 21, col='black', bg="blue", cex = 1.5)
+text(x = st_coordinates(fpi)[,1] + 2, 
+     y = st_coordinates(fpi)[,2] + 2, 
+     labels = fpi$number_pino)
+plot(sf::st_geometry(b25), add = TRUE, pch = 19, border="blue")
+plot(sf::st_geometry(pines), add = TRUE, pch = 4, col='black', cex =1.2)
+```
+
+Another bias could be derivated of the threshold considered to estimate the % of available soil. 
+
+## Relation of Avialable soil with the number of clutches of processionary moths
+
+We explore the relation of % of availabe soil to the number of clutches. A simple exploratory plot: 
+
+```{r, fig.height=10}
+x |> 
+  filter(available_soil_pct > 30) |> 
+  ggplot(aes(x=available_soil_pct, y=number_puestas, colour = site)) +
+  geom_point() + 
+  geom_smooth(method = "lm") + 
+  theme_minimal() +
+  xlab("% available soil") +
+  ylab("clutches (number)") + 
+  facet_wrap(~site, ncol = 1, scales = "free_y")
+```
+
+```{r, echo=FALSE}
+result <- x |> mutate(across(below_50:above_50,.fns = ~round(., 2)))
+write_csv(result, "data/pct_available_soil.csv") 
+```
+
+
+```{r, fig.height=10}
+x |> 
+  filter(available_soil_pct > 30) |> 
+  filter(number_puestas > 0) |> 
+  ggplot(aes(x=available_soil_pct, y=number_puestas, colour = site)) +
+  geom_point() + 
+  geom_smooth(method = "lm") + 
+  theme_minimal() +
+  xlab("% available soil") +
+  ylab("clutches (number) > 0") + 
+  facet_wrap(~site, ncol = 1, scales = "free_y") 
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r, echo=FALSE, eval=FALSE}
+library(pscl)
+# Primero vamos a modelar un ZIP con todas las covariables
+
+x$site <- as.factor(x$site)
+
+zip0 <- zeroinfl(number_puestas~available_soil_pct+site|available_soil_pct+site, data=x, dist="poisson", link="logit") 
+summary (zip0) 
+
+### Test de Vuong para comparar con una zinb 
+zinb0 <- zeroinfl(number_puestas~available_soil_pct, data=x, dist="negbin", link="logit") 
+
+####### COMPUTAMOS EL ESTAD?STICO DE Vuong
+vuong(zinb0, zip0)
+
+
+
+mod.nulo <- zeroinfl(number_puestas~1, data=x, dist="poisson", link="logit") 
+mod.soil <- zeroinfl(number_puestas~available_soil_pct, data=x, dist="poisson", link="logit")
+
+
+
+newU1 <- data.frame(available_soil_pct = seq(from=0, to=100, by=0.25))
+newU1$site <- rep("VC", length(newU1))
+newU2 <- data.frame(available_soil_pct = seq(from=0, to=100, by=0.25))
+newU2$site <- rep("CQ", length(newU2))
+newU3 <- data.frame(available_soil_pct = seq(from=0, to=100, by=0.25))
+newU3$site <- rep("LP", length(newU3))
+
+simUSO <- rbind(newU1,newU2,newU3)
+simUSO$site <- as.factor(simUSO$site) 
+
+
+
+preUSO <- predict(zip0, newdata=simUSO, type="response")
+preUSO <- as.matrix(preUSO) 
+
+# Pongo el nombre de la variable predichos 
+colnames(preUSO) <- "predichos"
+# Le a?ado una columna (valores predichos) a los datos simulados
+pred.USO <- cbind(simUSO,preUSO)
+
+siteVC <- pred.USO[pred.USO$site == "VC",]
+siteCQ <- pred.USO[pred.USO$site == "CQ",]
+siteLP <- pred.USO[pred.USO$site == "LP",]
+
+puntoVC <- siteVC[siteVC$available_soil_pct %in% seq(0,100,4),]
+puntoCQ <- siteCQ[siteCQ$available_soil_pct %in% seq(0,100,4),]
+puntoLP <- siteLP[siteLP$available_soil_pct %in% seq(0,100,4),]
+
+
+# Ahora el GRAFICO
+# Obtener el rango del grafico
+xrange <- range(pred.USO$available_soil_pct)
+yrange <- c(0,20)
+
+# pdf(file="predichos_sin_HMS_junio_2012.pdf", width=10,height=10)
+par(mar=c(5,6,4,2))
+plot(xrange, yrange, xaxs="i",
+     xlab = "% available soil",
+     ylab = "Number of puestas", type="n", cex.axis=1.5, cex.lab=1.5)
+
+lines(siteVC$available_soil_pct, siteVC$predichos, lwd=1.5, col="red")
+points(puntoVC$available_soil_pct, puntoVC$predichos, pch=19, col="red")
+
+lines(siteLP$available_soil_pct, siteLP$predichos, lwd=1.5, lty = 3)
+points(puntoLP$available_soil_pct, puntoLP$predichos, pch=21, bg="white", col="black")
+
+lines(siteCQ$available_soil_pct, siteCQ$predichos, lwd=1.5, col = "blue")
+points(puntoCQ$available_soil_pct, puntoCQ$predichos, pch=15, col="blue")
+
+real_vc <- x |> filter(site == "VC")
+  
+points(x$available_soil_pct, x$number_puestas, pch=19, cex=.5, col = "gray")
+
+
+legend(10, 20, c("VC","LP", "CQ"), cex=1.5, 
+       pch=c(19,21,15), lty=c(1,3,1), 
+       pt.bg=c("red", "white","blue"), 
+       col= c("red", "black","blue"), pt.cex=1.1, 
+       bty="n")
+```
+
+
+
